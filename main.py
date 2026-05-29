@@ -133,15 +133,14 @@ async def _stream_response(task: str, cid: str, loop_answer: str = None) -> Asyn
         orch_task = asyncio.create_task(run_orch())
         tick = 0
         while not orch_task.done():
-            # Hermes SSE comment'i chunk saymıyor — gerçek data chunk gönder
             if tick == 0:
                 yield await _progress_chunk(cid, "⏳ ")
             else:
                 yield await _progress_chunk(cid, ".")
             tick += 1
             await asyncio.sleep(5)
-        answer = result_holder.get("result", {}).get("synthesis", "[Yanıt alınamadı]")
-        # İlerleme noktalarından sonra yeni satır
+        res = result_holder.get("result", {})
+        answer = res.get("synthesis", "[Yanıt alınamadı]") + res.get("footer", "")
         yield await _progress_chunk(cid, "\n\n")
 
     chunk = {
@@ -191,7 +190,7 @@ async def chat_completions(req: ChatCompletionRequest):
 
     # Non-streaming
     result = await orchestrate(task, mode="smart", wiki=True)
-    answer = result["synthesis"]
+    answer = result["synthesis"] + result.get("footer", "")
     return {
         "id": cid,
         "object": "chat.completion",

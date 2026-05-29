@@ -20,7 +20,7 @@ Kullanım:
   python3 terminal_orchester.py --mode sequential "Görev"
 """
 
-import asyncio, os, re, shlex, argparse
+import asyncio, os, re, shlex, argparse, time
 from datetime import datetime
 from pathlib import Path
 
@@ -386,13 +386,38 @@ MODES = {
 }
 
 
+def _build_footer(result: dict, elapsed: int) -> str:
+    """Yanıt altına eklenen meta satırı."""
+    mode_label = result.get("mode", "").split(":")[1] if ":" in result.get("mode", "") else result.get("mode", "")
+
+    agents = result.get("agents", {})
+    models = []
+    if any(k in agents for k in ("claude", "claude_critique")):
+        models.append("Claude Sonnet 4.6")
+    if any(k in agents for k in ("opencode", "opencode_critique")):
+        models.append("OpenCode")
+    if "agy" in agents and not _agy_failed(agents.get("agy", "[AGY")):
+        models.append("AGY")
+    if "agy_draft" in agents or "agy_final" in agents:
+        models.append("AGY")
+
+    all_text = " ".join(str(v) for v in agents.values()) + " " + result.get("synthesis", "")
+    token_est = int(len(all_text.split()) * 1.3 / 100) * 100 or 100
+
+    model_str = " · ".join(models)
+    return f"\n\n---\n{mode_label} · {model_str} · {elapsed}sn · ~{token_est:,} token"
+
+
 async def orchestrate(task: str, mode: str = "parallel", wiki: bool = True) -> dict:
-    print(f"\n[Terminal Orchester v0.1]")
-    print(f"Ajanlar: Claude (Anthropic) + OpenCode (DeepSeek) + AGY (Antigravity)")
+    print(f"\n[Terminal Orchester v0.2]")
     print(f"Mod: {mode.upper()} | Gorev: {task[:70]}...")
+    t0 = time.time()
     result = await MODES.get(mode, mode_parallel)(task)
+    elapsed = int(time.time() - t0)
+    result["elapsed"] = elapsed
+    result["footer"] = _build_footer(result, elapsed)
     out = save_result(result)
-    print(f"\n  Kaydedildi: {out}")
+    print(f"\n  Kaydedildi: {out} ({elapsed}sn)")
     if wiki:
         update_graphify()
     return result
