@@ -386,9 +386,18 @@ MODES = {
 }
 
 
+_MODE_LABELS = {
+    "basit": "Simple",
+    "orta": "Medium",
+    "zor": "Complex",
+    "cozumsuz": "Complex",
+}
+
+
 def _build_footer(result: dict, elapsed: int) -> str:
-    """Yanıt altına eklenen meta satırı."""
-    mode_label = result.get("mode", "").split(":")[1] if ":" in result.get("mode", "") else result.get("mode", "")
+    """Response footer with mode / models / duration / token estimate."""
+    raw_label = result.get("mode", "").split(":")[1] if ":" in result.get("mode", "") else result.get("mode", "")
+    mode_label = _MODE_LABELS.get(raw_label, raw_label.capitalize())
 
     agents = result.get("agents", {})
     models = []
@@ -405,7 +414,7 @@ def _build_footer(result: dict, elapsed: int) -> str:
     token_est = int(len(all_text.split()) * 1.3 / 100) * 100 or 100
 
     model_str = " · ".join(models)
-    return f"\n\n---\n{mode_label} · {model_str} · {elapsed}sn · ~{token_est:,} token"
+    return f"\n\n---\n{mode_label} · {model_str} · {elapsed}s · ~{token_est:,} tokens"
 
 
 async def orchestrate(task: str, mode: str = "parallel", wiki: bool = True) -> dict:
