@@ -182,25 +182,6 @@ async def chat_completions(req: ChatCompletionRequest):
         context = system_messages[-1].content[:200]
         task = f"{task}\n\n[Bağlam: {context}...]"
 
-    # Eğer zaten assistant yanıtı varsa (loop tespiti) — son yanıtı döndür
-    # Hata mesajı ise loop tespitini atla, yeniden çalıştır
-    assistant_messages = [m for m in req.messages if m.role == "assistant"]
-    last_answer = assistant_messages[-1].content if assistant_messages else ""
-    is_error = last_answer.startswith("[") and "zaman" in last_answer or "hata" in last_answer
-    if assistant_messages and not is_error:
-        answer = last_answer
-        if req.stream:
-            return StreamingResponse(
-                _stream_response(task, cid, loop_answer=answer),
-                media_type="text/event-stream",
-            )
-        return {"id": cid, "object": "chat.completion", "created": int(time.time()),
-                "model": "terminal-orchester",
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": answer},
-                             "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 0, "completion_tokens": len((answer or "").split()),
-                          "total_tokens": len((answer or "").split())}}
-
     if req.stream:
         return StreamingResponse(
             _stream_response(task, cid),

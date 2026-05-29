@@ -1,103 +1,114 @@
 #!/usr/bin/env python3
 """
-2026-Orchester — Multi-Agent Debate System
-Claude vs Gemini vs GLM-4.7: 2-round debate + hakem sentezi
+2026-Orchester — Claude CLI Tabanlı Multi-Agent Debate
+API key gerektirmez. Pro üyelik + `claude -p` kullanır.
 
 Kullanım:
   python orchester.py "Sorum nedir?"
   python orchester.py --rounds 1 "Sorum nedir?"
 """
 
-import asyncio, httpx, json, sys, os
+import asyncio, sys, os, json
 from datetime import datetime
 from pathlib import Path
 
-OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OR_BASE = "https://openrouter.ai/api/v1/chat/completions"
-
+# Her ajan aynı Claude modelini kullanır ama farklı perspektiften düşünür
 AGENTS = [
     {
-        "id": "claude",
-        "name": "Claude Sonnet",
-        "model": "anthropic/claude-sonnet-4-5",
-        "role": "Analitik ve bütüncül düşünür. Güçlü yanları: derin analiz, etik boyutlar, bağlam.",
+        "id": "analyst",
+        "name": "Analist",
+        "system": (
+            "Sen analitik ve bütüncül bir düşünürsün. "
+            "Güçlü yanların: derin analiz, etik boyutlar, uzun vadeli sonuçlar, sistematik yaklaşım. "
+            "Yanıtını Türkçe ver. Max 300 kelime."
+        ),
     },
     {
-        "id": "gemini",
-        "name": "Gemini 2.5 Flash",
-        "model": "google/gemini-2.5-flash",
-        "role": "Hızlı ve yaratıcı. Güçlü yanları: multimodal bağlantılar, yeni perspektifler, pratik öneriler.",
+        "id": "critic",
+        "name": "Eleştirmen",
+        "system": (
+            "Sen eleştirel ve sorgulayıcı bir analistsin. "
+            "Güçlü yanların: varsayımları sorgulamak, zayıf noktaları bulmak, alternatif bakış açıları sunmak. "
+            "Yanıtını Türkçe ver. Max 300 kelime."
+        ),
     },
     {
-        "id": "glm",
-        "name": "GLM-4.7",
-        "model": "z-ai/glm-4.7",
-        "role": "Verimli ve odaklı. Güçlü yanları: kesin cevaplar, kısa formül, maliyet-etkin delegasyon.",
+        "id": "pragmatist",
+        "name": "Pragmatist",
+        "system": (
+            "Sen pratik ve çözüm odaklı bir düşünürsün. "
+            "Güçlü yanların: somut adımlar, hızlı uygulama, maliyet-etkin ve ölçülebilir öneriler. "
+            "Yanıtını Türkçe ver. Max 300 kelime."
+        ),
     },
 ]
 
-JUDGE = {
-    "name": "Hakem (Claude)",
-    "model": "anthropic/claude-sonnet-4-5",
-}
+JUDGE_SYSTEM = (
+    "Sen tarafsız bir hakemsin. Üç farklı perspektiften gelen tartışmayı okudun. "
+    "Görevin: en güçlü argümanları birleştirerek, zayıf noktaları ayıklayarak "
+    "KAPSAMLI ve EYLEME GEÇİLEBİLİR bir final yanıtı üret. "
+    "Yanıtını Türkçe ver. Max 400 kelime."
+)
 
 
-async def call_model(model: str, messages: list[dict]) -> str:
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_KEY}",
-        "HTTP-Referer": "https://birkan.ai",
-        "X-Title": "2026-Orchester",
-    }
-    payload = {"model": model, "messages": messages, "max_tokens": 1024}
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(OR_BASE, headers=headers, json=payload)
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"].strip()
+async def run_claude(user_prompt: str, system_extra: str = None) -> str:
+    """claude -p ile headless Claude çalıştır. Pro üyelik kullanır, API key gerektirmez."""
+    cmd = [
+        "claude", "-p",
+        "--dangerously-skip-permissions",
+        "--output-format", "text",
+    ]
+    if system_extra:
+        cmd += ["--append-system-prompt", system_extra]
+    cmd.append(user_prompt)
+
+    env = {**os.environ, "CLAUDE_CODE_BUBBLEWRAP": "1"}
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+        cwd="/root",
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError("claude -p zaman aşımına uğradı (120s)")
+
+    if proc.returncode != 0:
+        err = stderr.decode()[:300]
+        raise RuntimeError(f"claude -p hata kodu {proc.returncode}: {err}")
+
+    return stdout.decode().strip()
 
 
 async def round_one(task: str) -> dict[str, str]:
-    """Her ajan bağımsız cevap verir."""
-    system_tmpl = (
-        "Sen bir yapay zeka ajansın. Kimliğin: {name}. Rolün: {role}\n"
-        "Soruya dürüst ve özgün cevap ver. Kısa ama öz ol (max 300 kelime)."
-    )
-
-    async def ask(agent):
-        msgs = [
-            {"role": "system", "content": system_tmpl.format(**agent)},
-            {"role": "user", "content": task},
-        ]
-        return agent["id"], await call_model(agent["model"], msgs)
+    """Her ajan bağımsız cevap verir — paralel."""
+    async def ask(agent: dict) -> tuple[str, str]:
+        prompt = f"Şu soruya / göreve bağımsız olarak cevap ver:\n\n{task}"
+        response = await run_claude(prompt, agent["system"])
+        return agent["id"], response
 
     results = await asyncio.gather(*[ask(a) for a in AGENTS])
     return dict(results)
 
 
 async def round_two(task: str, r1: dict[str, str]) -> dict[str, str]:
-    """Her ajan diğerlerini görüp revize eder."""
-    others_tmpl = "\n\n".join(
-        f"**{a['name']}:** {r1[a['id']]}"
-        for a in AGENTS
+    """Her ajan diğerlerini görüp revize eder — paralel."""
+    others_block = "\n\n".join(
+        f"**{a['name']}:** {r1[a['id']]}" for a in AGENTS
     )
 
-    system_tmpl = (
-        "Sen {name} ajansısın. Rolün: {role}\n"
-        "Aşağıda diğer ajanların ilk cevapları var. "
-        "Kendi görüşünü savun veya fikir değiştir — ama gerekçeni açıkla. "
-        "Tekrar etme, sadece farklılığını ortaya koy (max 250 kelime)."
-    )
-
-    async def ask(agent):
-        user_msg = (
-            f"Soru: {task}\n\n"
-            f"Diğer ajanların cevapları:\n{others_tmpl}\n\n"
-            "Şimdi sen revize et veya savun:"
+    async def ask(agent: dict) -> tuple[str, str]:
+        prompt = (
+            f"Soru/Görev: {task}\n\n"
+            f"Diğer ajanların ilk cevapları:\n{others_block}\n\n"
+            "Şimdi kendi görüşünü savun veya fikir değiştir — ama gerekçeni açıkla. "
+            "Tekrar etme, sadece farklılığını ortaya koy."
         )
-        msgs = [
-            {"role": "system", "content": system_tmpl.format(**agent)},
-            {"role": "user", "content": user_msg},
-        ]
-        return agent["id"], await call_model(agent["model"], msgs)
+        response = await run_claude(prompt, agent["system"])
+        return agent["id"], response
 
     results = await asyncio.gather(*[ask(a) for a in AGENTS])
     return dict(results)
@@ -109,28 +120,23 @@ async def synthesize(task: str, r1: dict, r2: dict) -> str:
     for a in AGENTS:
         debate_text += f"\n### {a['name']}\n"
         debate_text += f"**Tur 1:** {r1[a['id']]}\n\n"
-        debate_text += f"**Tur 2:** {r2[a['id']]}\n"
+        if r2 is not r1:
+            debate_text += f"**Tur 2:** {r2[a['id']]}\n"
 
-    msgs = [
-        {
-            "role": "system",
-            "content": (
-                "Sen tarafsız bir hakemsin. Üç yapay zekanın 2 turluk tartışmasını okudun. "
-                "Görevin: en güçlü argümanları birleştirerek, zayıf noktaları ayıklayarak "
-                "KAPSAMLI ve EYLEME GEÇİLEBİLİR bir final yanıtı üret (max 400 kelime)."
-            ),
-        },
-        {
-            "role": "user",
-            "content": f"Soru: {task}\n\nTartışma:\n{debate_text}\n\nFinal sentez:",
-        },
-    ]
-    return await call_model(JUDGE["model"], msgs)
+    prompt = (
+        f"Soru/Görev: {task}\n\n"
+        f"Tartışma:\n{debate_text}\n\n"
+        "Final sentez:"
+    )
+    return await run_claude(prompt, JUDGE_SYSTEM)
 
 
 def save_debate(task: str, r1: dict, r2: dict, synthesis: str) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = Path(__file__).parent / "debates" / f"{ts}.md"
+    debates_dir = Path(__file__).parent / "debates"
+    debates_dir.mkdir(exist_ok=True)
+    out = debates_dir / f"{ts}.md"
+
     lines = [
         f"# Orchester Tartışması — {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         f"\n**Soru:** {task}\n",
@@ -140,9 +146,10 @@ def save_debate(task: str, r1: dict, r2: dict, synthesis: str) -> Path:
     for a in AGENTS:
         lines += [f"### {a['name']}\n", r1[a["id"]], "\n"]
 
-    lines += ["\n---\n", "## Tur 2 — Karşılıklı Revizyon\n"]
-    for a in AGENTS:
-        lines += [f"### {a['name']}\n", r2[a["id"]], "\n"]
+    if r2 is not r1:
+        lines += ["\n---\n", "## Tur 2 — Karşılıklı Revizyon\n"]
+        for a in AGENTS:
+            lines += [f"### {a['name']}\n", r2[a["id"]], "\n"]
 
     lines += ["\n---\n", "## Final Sentezi (Hakem)\n", synthesis, "\n"]
     out.write_text("\n".join(lines), encoding="utf-8")
@@ -150,33 +157,33 @@ def save_debate(task: str, r1: dict, r2: dict, synthesis: str) -> Path:
 
 
 async def debate(task: str, rounds: int = 2) -> str:
-    print(f"\n🎭 Orchester başlıyor: {len(AGENTS)} ajan, {rounds} tur\n")
+    print(f"\n[Orchester] {len(AGENTS)} ajan, {rounds} tur — claude -p (Pro üyelik)")
 
-    print("⏳ Tur 1: Bağımsız cevaplar...")
+    print("  Tur 1: Bağımsız cevaplar (paralel)...")
     r1 = await round_one(task)
     for a in AGENTS:
-        print(f"  ✅ {a['name']}: {len(r1[a['id']].split())} kelime")
+        print(f"    {a['name']}: {len(r1[a['id']].split())} kelime")
 
-    r2 = r1  # default if rounds=1
+    r2 = r1
     if rounds >= 2:
-        print("\n⏳ Tur 2: Karşılıklı revizyon...")
+        print("  Tur 2: Karşılıklı revizyon (paralel)...")
         r2 = await round_two(task, r1)
         for a in AGENTS:
-            print(f"  ✅ {a['name']}: {len(r2[a['id']].split())} kelime")
+            print(f"    {a['name']}: {len(r2[a['id']].split())} kelime")
 
-    print("\n⏳ Hakem sentezi yapıyor...")
+    print("  Hakem sentezi yapıyor...")
     synthesis = await synthesize(task, r1, r2)
-    print(f"  ✅ Sentez: {len(synthesis.split())} kelime")
+    print(f"    Sentez: {len(synthesis.split())} kelime")
 
     out = save_debate(task, r1, r2, synthesis)
-    print(f"\n💾 Kaydedildi: {out}")
+    print(f"  Kaydedildi: {out}")
     return synthesis
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Multi-agent debate")
+    parser = argparse.ArgumentParser(description="Claude CLI tabanlı multi-agent debate")
     parser.add_argument("task", nargs="+", help="Tartışılacak soru veya görev")
     parser.add_argument("--rounds", type=int, default=2, choices=[1, 2])
     args = parser.parse_args()
